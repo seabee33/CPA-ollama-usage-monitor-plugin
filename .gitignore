@@ -1,0 +1,6 @@
+/build/
+*.so
+*.dylib
+*.dll
+.env
+config.yaml
