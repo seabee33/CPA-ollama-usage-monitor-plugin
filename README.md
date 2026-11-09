@@ -1,58 +1,49 @@
 # CPA Ollama Usage Monitor
 
-A small, read-only native **CLIProxyAPI quota plugin**. Shows **5-hour/session and
-weekly quota remaining, with reset times, in CPA's existing Quota Management
-page**, using the Ollama Cloud API key already configured in AI Providers →
-OpenAI-compatible providers.
+A read-only **Ollama Usage sidebar page for stock CLIProxyAPI**. Displays
+**5-hour/session and weekly usage**, remaining quota, and reset times using
+Ollama's official API. No CPA fork or backend patch is required.
 
-No browser cookies, separate dashboard, management-key storage, provider edits,
-credential duplication, or HTML scraping. The plugin only declares the native
-`quota_provider` capability. CPA authenticates quota requests and passes the
-selected credential to the plugin server-side.
+Credit-based Ollama plans show included/purchased balances instead. Session and
+weekly windows are returned by Ollama for legacy plans; the monitor never
+estimates these limits from tokens or manufactures unsupported windows.
 
-## Compatibility — read before installing
+## Install and configure
 
-- Requires CPA native plugin ABI 1 with `quota_provider` support, plus a management
-  UI that renders plugin quota cards. Reference backend: CPA v8 source commit
-  `681ce41b6e44c45b15b79378b003909d6ba29e68`.
-- **The reference backend hides config-backed OpenAI-compatible keys from the
-  credential list used by Quota Management.** To make your existing provider show
-  up, apply the small [CPA compatibility patch](integration/README.md) and rebuild
-  CPA, unless your version already supports this. Installing the plugin alone on
-  that unpatched version will not create a quota card.
-- The current upstream Management Center supports `5h` and `weekly` plugin
-  buckets. Look under **All / Plugin** in Quota Management; the exact tab label
-  depends on your UI version. A dedicated Ollama tab is not injected.
-- Ollama's `/api/balance` returns session/weekly limits for **legacy plans**.
-  Credit-based plans show their actual included/purchased credits instead. The
-  plugin never fabricates a 5-hour window from token counts.
+Requires CPA's native plugin ABI 1 and Management API resource capability, plus a
+management UI with plugin sidebar support. Tested against unmodified CPA source
+commit `681ce41b6e44c45b15b79378b003909d6ba29e68` (v8 module).
 
-## Install
-
-1. Keep your existing OpenAI-compatible provider:
-
-   ```yaml
-   openai-compatibility:
-     - name: "Ollama"
-       base-url: "https://ollama.com/v1"
-       api-key-entries:
-         - api-key: "YOUR_EXISTING_OLLAMA_KEY"
-       # Keep your existing models and other provider settings.
-   ```
-
-2. Build on the target OS/architecture with a current patched Go (1.26+) and C
-   compiler. For Linux:
+1. Build using a current patched Go (1.26+) and C compiler:
 
    ```sh
    mkdir -p build
    go build -trimpath -buildmode=c-shared -o build/ollama-usage-monitor.so .
    ```
 
-   Copy the library to CPA's `plugins/linux/amd64/ollama-usage-monitor.so` (use
-   `arm64` for ARM servers). macOS uses `.dylib`; Windows uses `.dll` with a C
-   compiler. For containers, build against a compatible libc (glibc vs musl).
+   Copy to CPA's `plugins/linux/amd64/ollama-usage-monitor.so` (use `arm64` for
+   ARM servers). Build against a compatible libc for your container/server.
+   macOS uses `.dylib`; Windows uses `.dll` and needs a C compiler.
 
-3. Merge this into CPA's existing configuration:
+2. Generate a separate dashboard access token:
+
+   ```sh
+   openssl rand -hex 32
+   ```
+
+3. Set these environment variables **in the CPA service/container environment**:
+
+   ```text
+   OLLAMA_MONITOR_TOKEN=<the generated dashboard token>
+   OLLAMA_MONITOR_API_KEY=<your Ollama Cloud API key>
+   ```
+
+   The Ollama key can be the same key you already use in AI Providers. This plugin
+   configures its own server-side reference; it does not automatically retrieve
+   keys from OpenAI-compatible providers. You can use the same environment
+   variable wherever your deployment supports secret references.
+
+4. Merge this into CPA's existing config:
 
    ```yaml
    plugins:
@@ -62,102 +53,124 @@ selected credential to the plugin server-side.
        ollama-usage-monitor:
          enabled: true
          priority: 10
-         provider_names: ["Ollama"]
+         dashboard_token_env: "OLLAMA_MONITOR_TOKEN"
+         accounts:
+           - name: "Personal"
+             api_key_env: "OLLAMA_MONITOR_API_KEY"
    ```
 
-   `provider_names` must match the **name** of your existing provider, not its model
-   names. Matching is case-insensitive. Defaults are `Ollama` and `Ollama Cloud`.
-   Custom names work, e.g. `["Personal Ollama", "Work Ollama"]`. Both the v8
-   `openai-compatible-...` provider IDs and older unprefixed IDs are advertised.
+   Alternatively, use `dashboard_token` and `api_key` with literal values in the
+   private config. Do not specify both the literal and environment form for a
+   secret. Protect config files, environment files, and backups (e.g. mode 0600).
+   Each account needs a unique name; up to 32 accounts are supported.
 
-4. Apply the compatibility patch if required, restart CPA, reload the management
-   UI, open Quota Management, and refresh your Ollama card.
+5. Restart CPA and open **Ollama Usage** in its sidebar. Enter your **dashboard
+   access token**, not your Ollama key or CPA management key. Select Refresh all
+   to update quota. Use **Lock dashboard** when finished.
 
-   A response with 75% remaining means **25% used**. The native UI controls whether
-   the bar is labelled used or remaining. Both reset timestamps are supplied.
+The page can also be opened directly at:
+`/v0/resource/plugins/ollama-usage-monitor/dashboard` on your CPA server.
+Use HTTPS, a VPN with appropriate transport protection, or an SSH tunnel when
+sending the dashboard token. The page intentionally uses a separate access token
+because CPA's plugin resource routes are not management-authenticated.
 
-## Authentication and security
+## What the dashboard shows
 
-- CPA supplies `attributes.api_key` and `attributes.base_url` for the selected
-  credential. No API key needs to be copied into plugin configuration.
-- Only exact Ollama Cloud base URLs are accepted: `https://ollama.com/v1`,
-  `https://ollama.com/api`, or `https://ollama.com`, with optional trailing slashes.
-  Keys configured for local Ollama or another service are rejected.
-- The only upstream request is `GET https://ollama.com/api/balance`, authenticated
-  with `Authorization: Bearer <key>`. Redirects are never followed; TLS validation
-  stays enabled. Standard Go HTTPS proxy environment settings are respected.
-- No public resource routes, file writes, host credential-save callbacks, shell
-  execution, or management API loopback requests are implemented.
-- Responses are limited to 128 KiB, requests to 15 seconds, and cache entries to
-  256. Fetches are serialized and cached for at least 60 seconds, including
-  failures. `Retry-After` is honored up to 24 hours. Cached keys are SHA-256 hashes;
-  plaintext keys are not stored in the cache. Upstream errors are sanitized.
-- Limits are account-level, not per key or per CPA instance. Multiple keys for
-  the same account show the same quota; caches are per key because Ollama supplies
-  no account ID here. Avoid refreshing many keys for the same account: Ollama's
-  limit is 10 requests/minute/user, shared across keys and devices.
-- CPA management authentication must remain enabled. A native library runs with
-  the CPA process's permissions; run CPA unprivileged and protect config/backups.
-  An inference API key is not a read-only scoped credential merely because this
-  plugin uses it read-only.
+- **5-hour usage** and **weekly usage** with percentage-used bars and local reset
+  dates. A provider response of 75% remaining is displayed as 25% used.
+- Included and purchased credits where returned by Ollama.
+- Independent errors per account, so one expired key does not hide other cards.
+- Explicit cached-result messaging. Refresh is manual; successful and failed
+  fetches are cached for at least 60 seconds.
+
+Quota is account-wide, including requests made outside CPA. Multiple API keys
+for the same Ollama account will show the same limits. Configure one monitoring
+entry per Ollama account where possible.
+
+## Security model
+
+- The public dashboard shell, JavaScript, and CSS contain no account data or
+  credentials. The `/data` route validates the dashboard token **on every
+  request**, before listing accounts or fetching usage. Missing token configuration
+  disables data access. Invalid reloads invalidate existing dashboard access.
+- The token is sent only in `X-Ollama-Monitor-Token`, never in a URL or cookie.
+  It lives only in page memory; it is not saved to local/session storage. Locking
+  or navigating away clears it. Dashboard data responses use `Cache-Control:
+  no-store`. Configure proxies not to log the custom token header.
+- All holders of the dashboard token can view all configured accounts. It is a
+  shared read-only access token, not per-user authentication. Use a strong random
+  value (32–256 characters), distinct from the API keys and CPA management key.
+- Account names and API responses are rendered as text, not injected as HTML.
+  A restrictive CSP blocks inline scripts, third-party content, and foreign
+  framing while permitting same-origin CPA sidebar embedding.
+- Only `GET https://ollama.com/api/balance` is called. TLS verification is enabled,
+  redirects are rejected, bodies are capped at 128 KiB, and calls have a 15-second
+  timeout. Standard Go HTTPS proxy environment settings are respected.
+- Fetches are serialized, cached per hashed API key, and limited to 256 live cache
+  entries. `Retry-After` is honored up to 24 hours. Ollama's per-user limit is 10
+  requests/minute shared across keys/devices; avoid redundant account entries.
+- The plugin performs no provider edits, key cleanup, config writes, shell
+  execution, or loopback management calls. It stores the configured API keys in
+  process memory to make requests; it never sends them to the browser.
+- A native plugin has the permissions of the CPA process. Run CPA unprivileged.
+  The Ollama API key itself is not read-only scoped just because this monitor is.
 
 ## Troubleshooting
 
-**No card:** Confirm the plugin is loaded, `provider_names` matches, the provider
-is enabled, the UI supports plugin quotas, and the compatibility patch is applied.
-The authenticated `/v8/management/credentials` response should contain your
-credential with `supports_quota: true` and
-`quota_plugin_id: "ollama-usage-monitor"`.
+**Sidebar missing:** Check plugin loading, the exact library basename
+`ollama-usage-monitor`, enabled configuration, and management UI plugin-sidebar
+support. Reload the UI. Try the direct dashboard URL above.
 
-**Check the backend directly:** Using your normal authenticated management client,
-POST `/v8/management/plugins/ollama-usage-monitor/quota` with
-`{"auth_index":"<the credential's auth_index>"}`. Do not put the Ollama key in
-this request; CPA resolves it. This is also useful to distinguish UI issues from
-plugin/API issues.
+**Access not configured:** Set `dashboard_token_env` or `dashboard_token` and
+reload/restart CPA. Environment variables must belong to the CPA process; setting
+them in an unrelated terminal will not update a running service.
 
-**401:** Update the existing key in AI Providers. Key rotation bypasses the old
-key's cache automatically. **403:** Check Ollama account access. **404:** The API
-is unavailable; the monitor fails visibly rather than falling back to cookies.
-**429:** Wait for the cooldown. Repeated refreshes do not bypass it.
+**401 from dashboard:** Enter the separate dashboard access token. **Ollama 401:**
+Update the account API key in server configuration. **429:** Wait for the cached
+cooldown. **404:** The official balance endpoint is unavailable; the monitor does
+not fall back to browser cookies. Credit-based plans do not have legacy 5-hour
+or weekly buckets.
 
-## Development and verification
+## Tests and builds
 
 ```sh
 go test -race ./...
 go vet ./...
 go build -trimpath -buildmode=c-shared -o build/ollama-usage-monitor.so .
 python3 scripts/abi_smoke.py build/ollama-usage-monitor.so
+python3 scripts/cpa_smoke.py /path/to/stock/cli-proxy-api build/ollama-usage-monitor.so
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
-Tests use synthetic keys and mocked Ollama responses, covering quota conversion,
-invalid schemas, credential boundaries, concurrency/cache behavior, rate limiting,
-redirect rejection, secret redaction, ABI loading, and read-only capabilities.
-No real Ollama credentials are required. A real-account/live-dashboard test is
-still needed in your deployment; source compatibility does not establish your
-installed CPA/UI versions or account plan.
+Tests use synthetic credentials. Unit tests cover balance conversion, auth,
+configuration, cache concurrency, rate-limit handling, redirects, and redaction.
+The native ABI and stock-CPA integration tests verify real library loading and
+protected resource dispatch without making requests to Ollama. A real-account
+test is still needed for your deployment and account plan.
 
-The patched reference CPA was also built and tested with synthetic credentials:
+`scripts/dashboard_smoke.cjs` additionally exercises the page in headless Chromium
+with fixture responses: unlocking, percentage conversion, safe text rendering,
+mobile layout, memory-only token handling, and locking. Run it with Playwright
+installed and available via `NODE_PATH`; its browser must be installed separately.
 
-```sh
-python3 scripts/cpa_smoke.py /path/to/patched/cli-proxy-api build/ollama-usage-monitor.so
-```
+GitHub Actions builds Linux amd64 and arm64. Tagged releases use the official
+store format, e.g. `ollama-usage-monitor_0.2.0_linux_amd64.zip`, containing the
+library at the ZIP root, plus `checksums.txt`. Store listing requires a separate
+registry submission; this repository is not automatically listed.
 
-This Linux amd64 integration check starts an isolated loopback CPA process and
-checks plugin discovery, configured credential visibility, secret redaction,
-authenticated quota dispatch, and rejection of non-Ollama credentials. It never
-sends the synthetic keys to Ollama.
+## Migration from the initial prototype
 
-GitHub Actions tests and builds Linux amd64/arm64 libraries. Tagging `v*` publishes
-archives and SHA-256 checksums. Build locally for other platforms.
+Version 0.2 replaces the native quota-card prototype with this self-contained
+sidebar plugin. It does **not** require the earlier CPA visibility patch, and
+does not place a card in the built-in Quota Management page. Remove obsolete
+`provider_names`, configure `accounts` and a dashboard token, and use stock CPA.
+The old patch is no longer distributed or maintained.
 
-## Scope and API reference
+## References and license
 
-This first version deliberately focuses on the requested quota windows. It uses
-the official [Balance API](https://docs.ollama.com/api/balance), not the separate
-[Usage history API](https://docs.ollama.com/api/cloud-usage). Token-history charts
-are not required to report session/weekly quota correctly.
+- [Ollama balance API](https://docs.ollama.com/api/balance)
+- [Ollama authentication](https://docs.ollama.com/api/authentication)
+- [CPA plugin store requirements](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store)
 
-This is a fresh implementation using CPA's public ABI contract and Ollama's JSON
-API. It does not incorporate the original monitor's HTML parser or provider-edit
-code. Licensed under MIT.
+Fresh implementation under MIT; no HTML-scraping or provider-editing code from
+the original monitor is incorporated.

@@ -27,13 +27,15 @@ jobs:
       - name: Build and check ABI
         run: |
           mkdir -p build
-          go build -trimpath -buildmode=c-shared -o build/ollama-usage-monitor.so .
+          version="0.2.0"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          go build -trimpath -ldflags="-X main.version=$version" -buildmode=c-shared -o build/ollama-usage-monitor.so .
           python3 scripts/abi_smoke.py build/ollama-usage-monitor.so
-          tar -czf ollama-usage-monitor_linux_${{ matrix.arch }}.tar.gz -C build ollama-usage-monitor.so
+          zip -j "ollama-usage-monitor_${version}_linux_${{ matrix.arch }}.zip" build/ollama-usage-monitor.so
       - uses: actions/upload-artifact@v4
         with:
           name: ollama-usage-monitor_linux_${{ matrix.arch }}
-          path: '*.tar.gz'
+          path: '*.zip'
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
@@ -45,9 +47,9 @@ jobs:
         with:
           path: assets
           merge-multiple: true
-      - run: sha256sum *.tar.gz > checksums.txt
+      - run: sha256sum *.zip > checksums.txt
         working-directory: assets
-      - run: gh release create "$TAG" assets/*.tar.gz assets/checksums.txt --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+      - run: gh release create "$TAG" assets/*.zip assets/checksums.txt --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}

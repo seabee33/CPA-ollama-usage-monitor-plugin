@@ -44,11 +44,12 @@ def invoke(method, payload):
 
 registration = invoke("plugin.register", {"schema_version": 10})
 assert registration["ok"]
-assert registration["result"]["capabilities"] == {"quota_provider": True}
-assert invoke("quota.identifier", {})["result"]["identifier"] == "openai-compatible-ollama"
-assert "openai-compatible-ollama" in invoke("quota.describe", {})["result"]["supported_providers"]
+assert registration["result"]["capabilities"] == {"management_api": True}
+resources = invoke("management.register", {})["result"]["resources"]
+assert resources[0]["Menu"] == "Ollama Usage"
 assert not invoke("quota.fetch", {"attributes": {"base_url": "http://localhost", "api_key": "test"}})["ok"]
-assert not invoke("management.handle", {})["ok"]
+page = invoke("management.handle", {"Method": "GET", "Path": "/v0/resource/plugins/ollama-usage-monitor/dashboard"})
+assert page["result"]["StatusCode"] == 200
 assert not invoke("quota.reset", {})["ok"]
 plugin.stop()
 print("Native ABI smoke test passed")

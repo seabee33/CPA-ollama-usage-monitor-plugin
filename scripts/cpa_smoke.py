@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Integration check against a patched CPA binary; uses only synthetic keys.
+"""Integration check against a stock CPA binary; uses only synthetic keys.
 
 Usage: python3 scripts/cpa_smoke.py /path/to/cli-proxy-api build/ollama-usage-monitor.so
-No request to Ollama is made: the quota-fetch test uses a rejected base URL.
+No request to Ollama is made: the data test lists configured account names only.
 """
 import json
 import pathlib
@@ -41,7 +41,10 @@ plugins:
   configs:
     ollama-usage-monitor:
       enabled: true
-      provider_names: ["Ollama", "Rejected"]
+      dashboard_token: "synthetic-dashboard-token-32-characters"
+      accounts:
+        - name: "Personal"
+          api_key: "synthetic-ollama-key"
 openai-compatibility:
   - name: "Ollama"
     base-url: "https://ollama.com/v1"
@@ -56,12 +59,14 @@ openai-compatibility:
     models:
       - name: "synthetic-model"
 ''')
-    base = f"http://127.0.0.1:{port}/v8/management"
+    base = f"http://127.0.0.1:{port}"
 
-    def request(path, payload=None, authenticated=True):
+    def request(path, payload=None, authenticated=True, dashboard_token=None):
         headers = {"Content-Type": "application/json"}
         if authenticated:
             headers["Authorization"] = "Bearer synthetic-management-key"
+        if dashboard_token is not None:
+            headers["X-Ollama-Monitor-Token"] = dashboard_token
         req = urllib.request.Request(base + path, headers=headers,
                                      data=None if payload is None else json.dumps(payload).encode())
         try:
@@ -77,7 +82,7 @@ openai-compatibility:
             deadline = time.monotonic() + 30
             while True:
                 try:
-                    status, body = request("/credentials")
+                    status, body = request("/v0/resource/plugins/ollama-usage-monitor/dashboard", authenticated=False)
                     if status == 200:
                         break
                 except (OSError, urllib.error.URLError):
@@ -86,21 +91,23 @@ openai-compatibility:
                     log.seek(0)
                     raise RuntimeError("CPA failed to start: " + log.read())
                 time.sleep(0.1)
-            files = json.loads(body)["files"]
-            assert len(files) == 2, body
-            for item in files:
-                assert item["supports_quota"] is True, item
-                assert item["quota_plugin_id"] == "ollama-usage-monitor", item
-            assert "synthetic-ollama-key" not in body and "synthetic-rejected-key" not in body
-            status, _ = request("/credentials", authenticated=False)
-            assert status in (401, 403), status
-            rejected = next(f for f in files if f["provider"] == "openai-compatible-rejected")
-            path = "/plugins/ollama-usage-monitor/quota"
-            status, body = request(path, {"auth_index": rejected["auth_index"]})
-            assert status == 502 and "select an Ollama Cloud credential" in body, (status, body)
-            status, _ = request(path, {"auth_index": rejected["auth_index"]}, authenticated=False)
-            assert status in (401, 403), status
-            print("CPA integration passed: plugin discovery, configured credential visibility, secret redaction, authenticated quota dispatch")
+            assert 'Unlock your dashboard' in body and 'synthetic-ollama-key' not in body
+            resource = '/v0/resource/plugins/ollama-usage-monitor'
+            for asset in ('/app.js', '/style.css'):
+                status, body = request(resource+asset, authenticated=False)
+                assert status == 200 and len(body) > 100
+            for key in (None, 'incorrect'):
+                status, body = request(resource+'/data', authenticated=False, dashboard_token=key)
+                assert status == 401 and 'Personal' not in body, (status, body)
+            # CPA management authentication is deliberately not sufficient for this route.
+            status, _ = request(resource+'/data')
+            assert status == 401
+            status, body = request(resource+'/data', authenticated=False, dashboard_token='synthetic-dashboard-token-32-characters')
+            assert status == 200 and json.loads(body)['accounts'] == ['Personal'], (status, body)
+            assert 'synthetic-ollama-key' not in body
+            status, _ = request(resource+'/data?token=synthetic-dashboard-token-32-characters', authenticated=False)
+            assert status == 401
+            print('Stock CPA integration passed: sidebar assets, public-shell redaction, token-protected account listing, query-token rejection')
         finally:
             process.terminate()
             try:

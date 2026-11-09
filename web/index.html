@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ollama Usage</title><link rel="stylesheet" href="./style.css"><script defer src="./app.js"></script></head>
+<body><main>
+<header><div><p class="eyebrow">OLLAMA CLOUD</p><h1>Usage &amp; quota</h1><p class="muted">Your account limits, directly from Ollama.</p></div><span class="badge">Read-only monitor</span></header>
+<section id="login" class="panel"><h2>Unlock your dashboard</h2><p>Enter the separate dashboard access token configured for this plugin. This is not your Ollama API key or CPA management key.</p>
+<form id="unlock"><label for="token">Dashboard access token</label><div class="controls"><input id="token" type="password" autocomplete="off" required maxlength="256"><button type="submit">Unlock</button></div></form>
+<p class="muted">The token stays in this page’s memory and is cleared when you lock or leave the page. Use HTTPS or an SSH tunnel.</p></section>
+<p id="status" role="status" aria-live="polite"></p>
+<section id="dashboard" hidden><div class="toolbar"><button id="refresh">Refresh all</button><button id="lock" class="secondary">Lock dashboard</button><span class="muted">Results cached for 60 seconds · account-wide usage</span></div><div id="cards" class="cards"></div></section>
+<footer>Session and weekly limits are available on legacy plans. Credit-based plans show their actual balances. Quota includes usage outside this proxy.</footer>
+</main></body></html>

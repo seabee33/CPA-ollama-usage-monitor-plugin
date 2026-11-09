@@ -161,14 +161,11 @@ func TestOversizedAndTruncatedBodies(t *testing.T) {
 }
 func TestLifecycleAndReadOnlySurface(t *testing.T) {
 	p := newPlugin()
-	raw, _ := json.Marshal(map[string]any{"config_yaml": []byte("provider_names: [My Ollama]\nenabled: true\n")})
+	raw, _ := json.Marshal(map[string]any{"config_yaml": []byte("enabled: true\n")})
 	if _, err := p.handle("plugin.register", raw); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(p.providers, ",") != "my ollama,openai-compatible-my ollama" {
-		t.Fatal(p.providers)
-	}
-	for _, method := range []string{"management.handle", "management.register", "quota.reset", "host.auth.save"} {
+	for _, method := range []string{"quota.fetch", "quota.reset", "host.auth.save"} {
 		out, err := p.dispatch(method, []byte(`{}`))
 		if err != nil {
 			t.Fatal(err)

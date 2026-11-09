@@ -1,9 +1,11 @@
-// Package main implements a read-only CPA native quota provider.
+// Package main implements a read-only CPA Ollama sidebar monitor.
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 
@@ -12,7 +14,7 @@ import (
 
 const pluginID = "ollama-usage-monitor"
 
-var version = "0.1.0"
+var version = "0.2.0"
 
 // These wire types mirror CPA's quota-provider RPC contract. Keeping the small
 // contract local avoids linking an entire second copy of the proxy into CPA.
@@ -55,37 +57,28 @@ type envelope struct {
 }
 
 type pluginConfig struct {
-	ProviderNames []string `yaml:"provider_names"`
+	DashboardToken    string          `yaml:"dashboard_token"`
+	DashboardTokenEnv string          `yaml:"dashboard_token_env"`
+	Accounts          []accountConfig `yaml:"accounts"`
+}
+type accountConfig struct {
+	Name      string `yaml:"name"`
+	APIKey    string `yaml:"api_key"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }
 type plugin struct {
-	mu        sync.RWMutex
-	providers []string
-	monitor   *monitor
+	mu         sync.RWMutex
+	tokenHash  [32]byte
+	configured bool
+	accounts   []accountConfig
+	monitor    *monitor
 }
 
 func newPlugin() *plugin {
-	return &plugin{providers: providerIDs([]string{"Ollama", "Ollama Cloud"}), monitor: newMonitor()}
+	return &plugin{monitor: newMonitor()}
 }
 
 var app = newPlugin()
-
-func providerIDs(names []string) []string {
-	seen := map[string]bool{}
-	var result []string
-	for _, name := range names {
-		name = strings.ToLower(strings.TrimSpace(name))
-		if name == "" {
-			continue
-		}
-		for _, id := range []string{name, "openai-compatible-" + strings.TrimPrefix(name, "openai-compatible-")} {
-			if !seen[id] {
-				seen[id] = true
-				result = append(result, id)
-			}
-		}
-	}
-	return result
-}
 
 func (p *plugin) dispatch(method string, raw []byte) ([]byte, error) {
 	result, err := p.handle(method, raw)
@@ -101,49 +94,45 @@ func (p *plugin) handle(method string, raw []byte) (any, error) {
 		var req struct {
 			ConfigYAML []byte `json:"config_yaml"`
 		}
+		// Invalidate access before parsing, so malformed reloads cannot retain an old token.
+		p.mu.Lock()
+		p.configured = false
+		p.accounts = nil
+		p.mu.Unlock()
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, errors.New("invalid lifecycle request")
 		}
-		cfg := pluginConfig{ProviderNames: []string{"Ollama", "Ollama Cloud"}}
+		cfg := pluginConfig{}
 		if err := yaml.Unmarshal(req.ConfigYAML, &cfg); err != nil {
 			return nil, errors.New("invalid plugin YAML configuration")
 		}
-		if len(cfg.ProviderNames) > 64 {
-			return nil, errors.New("at most 64 provider names are supported")
-		}
-		ids := providerIDs(cfg.ProviderNames)
-		if len(ids) == 0 {
-			return nil, errors.New("provider_names must contain an Ollama provider name")
-		}
+		token, accounts, err := validateConfig(cfg)
 		p.mu.Lock()
-		p.providers = ids
+		// Fail closed on invalid replacement configuration, including token removal.
+		p.configured = err == nil && token != ""
+		p.tokenHash = sha256.Sum256([]byte(token))
+		p.accounts = accounts
 		p.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
 		return map[string]any{
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name": pluginID, "Version": version, "Author": "seabee33",
 				"GitHubRepository": "https://github.com/seabee33/CPA-ollama-usage-monitor-plugin",
-				"ConfigFields":     []map[string]string{{"Name": "provider_names", "Type": "array", "Description": "Names of your existing Ollama OpenAI-compatible providers. Defaults: Ollama, Ollama Cloud."}},
+				"ConfigFields": []map[string]string{
+					{"Name": "dashboard_token_env", "Type": "string", "Description": "Environment variable containing a separate random dashboard access token (at least 32 characters)."},
+					{"Name": "dashboard_token", "Type": "string", "Description": "Dashboard access token; prefer dashboard_token_env. Not your CPA management key."},
+					{"Name": "accounts", "Type": "array", "Description": "Accounts with name and api_key_env (recommended) or api_key."},
+				},
 			},
-			"capabilities": map[string]bool{"quota_provider": true},
+			"capabilities": map[string]bool{"management_api": true},
 		}, nil
-	case "quota.identifier":
-		return map[string]string{"identifier": "openai-compatible-ollama"}, nil
-	case "quota.describe":
-		p.mu.RLock()
-		ids := append([]string(nil), p.providers...)
-		p.mu.RUnlock()
-		return map[string]any{"supported_providers": ids, "display_name": "Ollama Cloud", "supports_reset": false}, nil
-	case "quota.fetch":
-		var req quotaRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, errors.New("invalid quota request")
-		}
-		key, err := credential(req)
-		if err != nil {
-			return nil, err
-		}
-		return p.monitor.fetch(key)
+	case "management.register":
+		return managementRegistration(), nil
+	case "management.handle":
+		return p.management(raw)
 	case "quota.reset":
 		return nil, errors.New("read-only monitor: Ollama quota cannot be reset")
 	case "plugin.shutdown":
@@ -168,3 +157,49 @@ func credential(req quotaRequest) (string, error) {
 }
 
 func main() {}
+
+func validateConfig(cfg pluginConfig) (string, []accountConfig, error) {
+	resolve := func(value, env string) (string, error) {
+		if value != "" && env != "" {
+			return "", errors.New("choose a literal secret or an environment variable, not both")
+		}
+		if env != "" {
+			value = os.Getenv(env)
+			if value == "" {
+				return "", errors.New("configured secret environment variable is empty or missing")
+			}
+		}
+		return strings.TrimSpace(value), nil
+	}
+	token, err := resolve(cfg.DashboardToken, cfg.DashboardTokenEnv)
+	if err != nil {
+		return "", nil, err
+	}
+	if token != "" && (len(token) < 32 || len(token) > 256 || strings.ContainsAny(token, "\r\n\x00")) {
+		return "", nil, errors.New("dashboard token must be 32–256 characters without control characters")
+	}
+	if len(cfg.Accounts) > 32 {
+		return "", nil, errors.New("at most 32 accounts are supported")
+	}
+	seen := map[string]bool{}
+	for i := range cfg.Accounts {
+		a := &cfg.Accounts[i]
+		a.Name = strings.TrimSpace(a.Name)
+		if a.Name == "" || len(a.Name) > 100 || seen[a.Name] {
+			return "", nil, errors.New("account names must be unique and 1–100 bytes long")
+		}
+		seen[a.Name] = true
+		a.APIKey, err = resolve(a.APIKey, a.APIKeyEnv)
+		if err != nil {
+			return "", nil, err
+		}
+		if _, err = credential(quotaRequest{Attributes: map[string]string{"base_url": "https://ollama.com/v1", "api_key": a.APIKey}}); err != nil {
+			return "", nil, err
+		}
+		if a.APIKey == token {
+			return "", nil, errors.New("dashboard token must differ from the Ollama API key")
+		}
+		a.APIKeyEnv = ""
+	}
+	return token, cfg.Accounts, nil
+}
