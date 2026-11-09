@@ -8,6 +8,19 @@ Credit-based Ollama plans show included/purchased balances instead. Session and
 weekly windows are returned by Ollama for legacy plans; the monitor never
 estimates these limits from tokens or manufactures unsupported windows.
 
+## Why a separate sidebar page?
+
+According to this project's maintainer, the CLIProxyAPI development team rejected
+their request to integrate Ollama Cloud into the built-in Quota Management page,
+explaining that they only support proprietary model providers there.
+
+For this project, a dedicated **Ollama Usage** sidebar page is therefore the only
+remaining supported solution we have identified that works with stock CPA and
+avoids maintaining a custom CPA fork. It provides the session and weekly quota
+view without requiring users to patch or rebuild CPA. This describes the
+maintainer's reported rejection and the integration options verified for this
+project, rather than a guarantee about every future CPA version or extension.
+
 ## Install and configure
 
 Requires CPA's native plugin ABI 1 and Management API resource capability, plus a
